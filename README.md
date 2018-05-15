@@ -1,0 +1,1 @@
+This is supposed to work with https://github.com/ARoefer/bullet3. Make sure you have the ROS_PACKAGE_PATH environment variable set up for this to work. The variable needs to contain the path to the folder containing this package.
