@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import rospy
 import pybullet as pb
 from pbsbtest.utils import res_pkg_path
 from collections import namedtuple

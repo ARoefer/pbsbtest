@@ -1,8 +1,16 @@
-import rospkg
+#import rospkg
+import os
 
-def res_pkg_path(rpath, resolver=rospkg.RosPack()):
+
+def res_pkg_path(rpath):
 	if rpath[:10] == 'package://':
+		paths = os.environ['ROS_PACKAGE_PATH'].split(':')
+
 		rpath = rpath[10:]
 		pkg = rpath[:rpath.find('/')]
-		return resolver.get_path(pkg) + rpath[len(pkg):]
+
+		for rpp in paths:
+			if os.path.isdir('{}/{}'.format(rpp, pkg)):
+				return '{}/{}'.format(rpp, rpath)
+		raise Exception('Package "{}" can not be found in ROS_PACKAGE_PATH!'.format(pkg))
 	return rpath
