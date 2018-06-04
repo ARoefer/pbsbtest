@@ -10,7 +10,7 @@ def res_pkg_path(rpath):
 		pkg = rpath[:rpath.find('/')]
 
 		for rpp in paths:
-			if rpp[rpp.rfind('/') + 1:] is pkg:
+			if rpp[rpp.rfind('/') + 1:] == pkg:
 				return '{}/{}'.format(rpp[:rpp.rfind('/')], rpath) 
 			if os.path.isdir('{}/{}'.format(rpp, pkg)):
 				return '{}/{}'.format(rpp, rpath)
