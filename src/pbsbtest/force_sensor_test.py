@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import rospy
 from gebsyas.simulator import BulletSimulator, vec3_to_list
 from gebsyas.ros_visualizer import ROSVisualizer
@@ -121,8 +123,10 @@ if __name__ == '__main__':
 
     controller = EEFPositionControl(robot, eef_frame, 'wrist_3_link', velocity=0.05)
 
-    wps = [(0,0,0, -0.3,-0.4,1), 
-           (0,0,0, -0.3,-0.2,1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
+    wps = [(0,0,0, -0.3,-0.4,1.1),
+           (0,0,0, -0.3,-0.4,1), 
+           (0,0,0, -0.3,-0.2,1),
+           (0,0,0, -0.3,-0.2,1.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
     wpsIdx = 0
     controller.set_goal(wps[wpsIdx])
 
