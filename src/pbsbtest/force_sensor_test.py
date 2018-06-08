@@ -101,36 +101,48 @@ if __name__ == '__main__':
 
     sim.init(mode=pb.GUI)
 
-    urdf_path = 'package://iai_table_robot_description/robots/ur5_table.urdf' # 'package://ur_description/urdf/ur5_robot.urdf' #'package://fetch_description/robots/fetch.urdf' # #  #
+    urdf_path = 'package://fetch_description/robots/fetch.urdf' # 'package://ur_description/urdf/ur5_robot.urdf'  # 'package://iai_table_robot_description/robots/ur5_table.urdf'
 
     robotId = sim.load_robot(urdf_path)
-    initial_js = {"elbow_joint": 0,
-                  "shoulder_lift_joint": -1.5707,
-                  "shoulder_pan_joint": 0,
-                  "wrist_1_joint": -1.5707,
-                  "wrist_2_joint": 0,
-                  "wrist_3_joint": 0}
+    # initial_js = {"elbow_joint": 0,
+    #               "shoulder_lift_joint": 0,
+    #               "shoulder_pan_joint": 0,
+    #               "wrist_1_joint": 0,
+    #               "wrist_2_joint": 0,
+    #               "wrist_3_joint": 0,
+    #               "gripper_base_gripper_left_joint": -0.04,
+    #               "gripper_joint": 0.08}
     
-    print('\n'.join(['  {}: {}'.format(j, p) for j, p in initial_js.items()]))
+    #print('\n'.join(['  {}: {}'.format(j, p) for j, p in initial_js.items()]))
 
     #sim.set_joint_positions(robotId, initial_js)
 
-    eef_frame = 'gripper_tool_frame' # 'ee_link'#
-    base_link = 'map'
+    wrist_link = 'wrist_roll_link' # 'wrist_3_link'
+    eef_frame = 'gripper_link' # 'gripper_tool_frame' # 'ee_link'#
+    base_link = 'base_link' # 'map'
 
     robot = Robot()
     robot.load_from_urdf_path(res_pkg_path(urdf_path), base_link, [eef_frame]) # 'base_link'
 
-    controller = EEFPositionControl(robot, eef_frame, 'wrist_3_link', velocity=0.05)
+    controller = EEFPositionControl(robot, eef_frame, wrist_link, velocity=0.05)
 
-    wps = [(0,0,0, -0.3,-0.4,1.1),
-           (0,0,0, -0.3,-0.4,1), 
-           (0,0,0, -0.3,-0.2,1),
-           (0,0,0, -0.3,-0.2,1.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
+    on_table_height = 0.7
+
+    wps = [(0,0,0, -0.3,-0.4,on_table_height + 0.1),
+           (0,0,0, -0.3,-0.4,on_table_height), 
+           (0,0,0, -0.3,-0.2,on_table_height),
+           (0,0,0, -0.3,-0.2,on_table_height + 0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
     wpsIdx = 0
     controller.set_goal(wps[wpsIdx])
 
-    #sim.set_real_time()
+
+    eef_state = sim.get_link_state(robotId, eef_frame)
+
+    connectorRbId = pb.createRigidBody(pb.GEOM_SPHERE, radius=0.005, position=eef_state.CoMFrame.position, mass=0.001)
+    
+    robotBId = sim.bodies[robotId].bulletId
+    eef_BIdx = sim.bodies[robotId].link_index_map[eef_frame]
+    connectorJId  = pb.createConstraint(robotBId, eef_BIdx, connectorRbId, -1, pb.JOINT_FIXED,[0,0,0],[0,0,0],[0,0,0],[0,0,0,1],[0,0,0,1])
 
     vis = ROSVisualizer('force_test/visual', base_link)
 
@@ -157,14 +169,15 @@ if __name__ == '__main__':
         sim.apply_joint_vel_cmds(robotId, next_cmd)
         sim.update()
 
-        b_eef_pos = pos_of(sim.get_link_state_sym(robotId, 'wrist_3_link').CoMFrame)
+        b_eef_pos = pos_of(sim.get_link_state_sym(robotId, wrist_link).CoMFrame)
         vis.draw_sphere('eef_bullet', b_eef_pos, 0.025)
         vis.draw_sphere('goal', wps[wpsIdx][3:], 0.025, r=0, g=1)
         vis.render()
 
         dist = norm(b_eef_pos - point3(*(wps[wpsIdx][3:])))
         #print('Distance to goal: {}'.format(dist))
-        if dist < 0.01:
+        if dist < 0.03:
             wpsIdx = (wpsIdx + 1) % len(wps)
             print('Waypoint reaced. Next one is number {}'.format(wpsIdx))
             controller.set_goal(wps[wpsIdx])
+            print('Joint state:\n{}'.format(str(js)))
