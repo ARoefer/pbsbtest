@@ -49,7 +49,7 @@ if __name__ == '__main__':
 	cId = pb.createConstraint(robotId, link_index_map['gripper_link'], 
 							  connectorId, -1, 
 							  pb.JOINT_FIXED, [0,0,0], 
-							  [0,0,0], [1,0,1], [0,0,0,1], [0,0,0,1])
+							  [0,0.2,0], [1,0,1], [0,0,0,1], [0,0,0,1])
 
 	while True:
 		if raw_input('TYPE Q TO END\n') in ['q', 'Q']:
