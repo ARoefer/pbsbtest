@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 
 import rospy
-from gebsyas.simulator import BulletSimulator, vec3_to_list
 from gebsyas.ros_visualizer import ROSVisualizer
-import pybullet as pb
 from giskardpy.robot import Robot
 from giskardpy.symengine_wrappers import point3, pos_of, norm, x_col, y_col, z_col, unitZ, dot, frame3_rpy, abs
 from pbsbtest.utils import res_pkg_path
 from sensor_msgs.msg import JointState as JointStateMsg
+from std_msgs.msg import Empty as EmptyMsg
 
 from giskardpy import USE_SYMENGINE
 from giskardpy.qpcontroller import QPController
@@ -37,7 +36,7 @@ class EEFPositionControl(QPController):
         wrist_frame = robot.frames[self.wrist]
         eef_frame = robot.frames[self.eef]
         eef_y = y_col(eef_frame)
-        eef_forward = z_col(eef_frame)
+        eef_forward = x_col(eef_frame)
 
 
         goal_expr = self.goal_eef[self.eef].get_expression()
@@ -94,90 +93,72 @@ class EEFPositionControl(QPController):
         self.update_observables(self.goal_eef[self.eef].get_update_dict(*goal))
 
 
+class Node(object):
+    def __init__(self, urdf_path, base_link, eef_frame, wrist_link, wps, pub_topic, js_topic):
+        self.wps = wps
+        self.wpsIdx = 0
+        
+        self.vis = ROSVisualizer('force_test', base_frame=base_link, plot_topic='plot')
+
+        self.robot = Robot()
+        self.robot.load_from_urdf_path(res_pkg_path(urdf_path), base_link, [eef_frame])
+        self.wrist_pos = pos_of(self.robot.frames[wrist_link])
+
+        self.controller = EEFPositionControl(self.robot, eef_frame, wrist_link, velocity=1)
+        self.controller.set_goal(self.wps[self.wpsIdx])
+
+        self.cmd_pub  = rospy.Publisher(pub_topic, JointStateMsg, queue_size=1)
+        self.tick_pub = rospy.Publisher('/trigger_tick', EmptyMsg, queue_size=1)
+        self.js_sub  = rospy.Subscriber(js_topic, JointStateMsg, callback=self.js_callback, queue_size=1)        
+
+    def js_callback(self, js_msg):
+        js = {js_msg.name[x]: js_msg.position[x] for x in range(len(js_msg.name))}
+        self.robot.set_joint_state(js)
+        eef_position = self.wrist_pos.subs(js)
+        dist = norm(eef_position - point3(*(self.wps[self.wpsIdx][3:])))        
+        if dist < 0.03:
+            self.wpsIdx = (self.wpsIdx + 1) % len(wps)
+            print('Waypoint reaced. Next one is number {}'.format(self.wpsIdx))
+            self.controller.set_goal(self.wps[self.wpsIdx])
+
+        next_cmd = self.controller.get_next_command()
+        cmd_msg = JointStateMsg()
+        cmd_msg.header.stamp = rospy.Time.now()
+        for jname, vc in next_cmd.items():
+            cmd_msg.name.append(jname)
+            cmd_msg.velocity.append(vc)
+
+        self.cmd_pub.publish(cmd_msg)
+
+        self.vis.begin_draw_cycle()
+        self.vis.draw_sphere('eef_giskard', eef_position, 0.025)
+        self.vis.draw_sphere('goal', self.wps[self.wpsIdx][3:], 0.025, r=0, g=1)
+        self.vis.render()
+
+        emsg =  EmptyMsg()
+        self.tick_pub.publish(emsg)
+
+
 if __name__ == '__main__':
     rospy.init_node('force_test')
     
-    sim = BulletSimulator(50)
+    urdf_path = 'package://iai_table_robot_description/robots/ur5_table.urdf'
 
-    sim.init(mode=pb.GUI)
+    wrist_link = 'wrist_3_link'
+    eef_frame = 'ee_link'#
+    base_link = 'map'
 
-    urdf_path = 'package://fetch_description/robots/fetch.urdf' # 'package://ur_description/urdf/ur5_robot.urdf'  # 'package://iai_table_robot_description/robots/ur5_table.urdf'
 
-    robotId = sim.load_robot(urdf_path)
-    # initial_js = {"elbow_joint": 0,
-    #               "shoulder_lift_joint": 0,
-    #               "shoulder_pan_joint": 0,
-    #               "wrist_1_joint": 0,
-    #               "wrist_2_joint": 0,
-    #               "wrist_3_joint": 0,
-    #               "gripper_base_gripper_left_joint": -0.04,
-    #               "gripper_joint": 0.08}
-    
-    #print('\n'.join(['  {}: {}'.format(j, p) for j, p in initial_js.items()]))
-
-    #sim.set_joint_positions(robotId, initial_js)
-
-    wrist_link = 'wrist_roll_link' # 'wrist_3_link'
-    eef_frame = 'gripper_link' # 'gripper_tool_frame' # 'ee_link'#
-    base_link = 'base_link' # 'map'
-
-    robot = Robot()
-    robot.load_from_urdf_path(res_pkg_path(urdf_path), base_link, [eef_frame]) # 'base_link'
-
-    controller = EEFPositionControl(robot, eef_frame, wrist_link, velocity=0.05)
-
-    on_table_height = 0.7
+    on_table_height = 0.9
 
     wps = [(0,0,0, -0.3,-0.4,on_table_height + 0.1),
            (0,0,0, -0.3,-0.4,on_table_height), 
            (0,0,0, -0.3,-0.2,on_table_height),
            (0,0,0, -0.3,-0.2,on_table_height + 0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
-    wpsIdx = 0
-    controller.set_goal(wps[wpsIdx])
 
+    node = Node(urdf_path, base_link, eef_frame, wrist_link, wps, 
+                '/ur5_table_description/commands/joint_velocities',
+                '/ur5_table_description/joint_state')
 
-    eef_state = sim.get_link_state(robotId, eef_frame)
-
-    connectorRbId = pb.createRigidBody(pb.GEOM_SPHERE, radius=0.005, position=eef_state.CoMFrame.position, mass=0.001)
-    
-    robotBId = sim.bodies[robotId].bulletId
-    eef_BIdx = sim.bodies[robotId].link_index_map[eef_frame]
-    connectorJId  = pb.createConstraint(robotBId, eef_BIdx, connectorRbId, -1, pb.JOINT_FIXED,[0,0,0],[0,0,0],[0,0,0],[0,0,0,1],[0,0,0,1])
-
-    vis = ROSVisualizer('force_test/visual', base_link)
-
-    sim_pub = rospy.Publisher('/joint_states', JointStateMsg, queue_size=5)
-
-    while True:
-        js = {jn: j.position for jn, j in sim.get_joint_state(robotId).items()}
-        robot.set_joint_state(js)
-        vis.begin_draw_cycle()
-        #vis.draw_robot_pose('robot', robot, js)
-        next_cmd = controller.get_next_command()
-        js_msg = JointStateMsg()
-        js_msg.header.stamp = rospy.Time.now()
-
-        for j, p in js.items():
-            js_msg.name.append(j)
-            js_msg.velocity.append(0)
-            js_msg.position.append(p)
-            js_msg.effort.append(0)
-
-        sim_pub.publish(js_msg)
-
-        #print('\n'.join(['  {}: {}'.format(j, p) for j, p in next_cmd.items()]))
-        sim.apply_joint_vel_cmds(robotId, next_cmd)
-        sim.update()
-
-        b_eef_pos = pos_of(sim.get_link_state_sym(robotId, wrist_link).CoMFrame)
-        vis.draw_sphere('eef_bullet', b_eef_pos, 0.025)
-        vis.draw_sphere('goal', wps[wpsIdx][3:], 0.025, r=0, g=1)
-        vis.render()
-
-        dist = norm(b_eef_pos - point3(*(wps[wpsIdx][3:])))
-        #print('Distance to goal: {}'.format(dist))
-        if dist < 0.03:
-            wpsIdx = (wpsIdx + 1) % len(wps)
-            print('Waypoint reaced. Next one is number {}'.format(wpsIdx))
-            controller.set_goal(wps[wpsIdx])
-            print('Joint state:\n{}'.format(str(js)))
+    while not rospy.is_shutdown():
+        pass
