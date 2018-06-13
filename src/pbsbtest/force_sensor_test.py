@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 
 import rospy
+import sys
+from time import time
 from gebsyas.ros_visualizer import ROSVisualizer
 from giskardpy.robot import Robot
 from giskardpy.symengine_wrappers import point3, pos_of, norm, x_col, y_col, z_col, unitZ, dot, frame3_rpy, abs
 from pbsbtest.utils import res_pkg_path
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_msgs.msg import Empty as EmptyMsg
+from rosgraph_msgs.msg import Clock as ClockMsg
 
 from giskardpy import USE_SYMENGINE
 from giskardpy.qpcontroller import QPController
@@ -14,6 +17,10 @@ from giskardpy.qp_problem_builder import SoftConstraint
 from giskardpy.input_system import ControllerInputArray, ScalarInput
 from giskardpy.input_system import FrameInputRPY as FrameInput
 
+from iai_bullet_sim.basic_simulator import BasicSimulator
+from iai_bullet_sim.ros_modules import JSPublisher, SensorPublisher
+
+from blessed import Terminal
 
 class EEFPositionControl(QPController):
     def __init__(self, robot, eef, wrist, velocity=0.2, weight=1):
@@ -94,7 +101,7 @@ class EEFPositionControl(QPController):
 
 
 class Node(object):
-    def __init__(self, urdf_path, base_link, eef_frame, wrist_link, wps, pub_topic, js_topic):
+    def __init__(self, urdf_path, base_link, eef_frame, wrist_link, wps):
         self.wps = wps
         self.wpsIdx = 0
         
@@ -107,36 +114,64 @@ class Node(object):
         self.controller = EEFPositionControl(self.robot, eef_frame, wrist_link, velocity=1)
         self.controller.set_goal(self.wps[self.wpsIdx])
 
-        self.cmd_pub  = rospy.Publisher(pub_topic, JointStateMsg, queue_size=1)
-        self.tick_pub = rospy.Publisher('/trigger_tick', EmptyMsg, queue_size=1)
-        self.js_sub  = rospy.Subscriber(js_topic, JointStateMsg, callback=self.js_callback, queue_size=1)        
+        self.tick_rate = 50
+        self.sim = BasicSimulator(self.tick_rate)
+        self.sim.init(mode='gui')
+    
+        plane = self.sim.load_urdf('package://iai_bullet_sim/urdf/plane.urdf', useFixedBase=1)
 
-    def js_callback(self, js_msg):
-        js = {js_msg.name[x]: js_msg.position[x] for x in range(len(js_msg.name))}
+        self.ur5 = self.sim.load_urdf('package://iai_table_robot_description/robots/ur5_table.urdf', useFixedBase=1)
+        self.ur5.enable_joint_sensor('wrist_3_joint')
+        ur5Id = self.sim.get_body_id(self.ur5.bId())
+        self.ur5_js_pub = JSPublisher(self.ur5, ur5Id)
+        self.ur5_sensor_pub = SensorPublisher(self.ur5, ur5Id)
+        self.sim.register_post_physics_cb(self.ur5_js_pub.update)
+        self.sim.register_post_physics_cb(self.ur5_sensor_pub.update)
+        
+        self.clock_pub = rospy.Publisher('/clock', ClockMsg, queue_size=1)
+        self.time = rospy.Time()
+        self.time_step = rospy.Duration(1.0 / self.tick_rate)
+        self.terminal = Terminal()
+        self.__last_tick = None
+        self.__last_msg_len = 0
+
+
+    def tick(self):
+        self.time += self.time_step
+        cmsg = ClockMsg()
+        cmsg.clock = self.time
+        self.clock_pub.publish(cmsg)
+
+        js = {j: s.position for j, s in self.ur5.joint_state().items()}
         self.robot.set_joint_state(js)
         eef_position = self.wrist_pos.subs(js)
         dist = norm(eef_position - point3(*(self.wps[self.wpsIdx][3:])))        
         if dist < 0.03:
             self.wpsIdx = (self.wpsIdx + 1) % len(wps)
-            print('Waypoint reaced. Next one is number {}'.format(self.wpsIdx))
+            print('\nWaypoint reaced. Next one is number {}'.format(self.wpsIdx))
             self.controller.set_goal(self.wps[self.wpsIdx])
 
         next_cmd = self.controller.get_next_command()
-        cmd_msg = JointStateMsg()
-        cmd_msg.header.stamp = rospy.Time.now()
-        for jname, vc in next_cmd.items():
-            cmd_msg.name.append(jname)
-            cmd_msg.velocity.append(vc)
 
-        self.cmd_pub.publish(cmd_msg)
+        self.ur5.apply_joint_vel_cmds(next_cmd)
+
+        self.sim.update()
 
         self.vis.begin_draw_cycle()
         self.vis.draw_sphere('eef_giskard', eef_position, 0.025)
         self.vis.draw_sphere('goal', self.wps[self.wpsIdx][3:], 0.025, r=0, g=1)
         self.vis.render()
 
-        emsg =  EmptyMsg()
-        self.tick_pub.publish(emsg)
+        now = time()
+        if self.__last_tick != None:
+            deltaT = now - self.__last_tick
+            ratio  = self.time_step.to_sec() / deltaT
+            sys.stdout.write(self.terminal.move(self.terminal.height,  0))
+            msg = u'Simulation Factor: {:03.4f}'.format(ratio)
+            self.__last_msg_len = len(msg)
+            sys.stdout.write(msg)
+            sys.stdout.flush()
+        self.__last_tick = now
 
 
 if __name__ == '__main__':
@@ -156,9 +191,7 @@ if __name__ == '__main__':
            (0,0,0, -0.3,-0.2,on_table_height),
            (0,0,0, -0.3,-0.2,on_table_height + 0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
 
-    node = Node(urdf_path, base_link, eef_frame, wrist_link, wps, 
-                '/ur5_table_description/commands/joint_velocities',
-                '/ur5_table_description/joint_state')
+    node = Node(urdf_path, base_link, eef_frame, wrist_link, wps)
 
     while not rospy.is_shutdown():
-        pass
+        node.tick()
