@@ -2,206 +2,192 @@
 
 import rospy
 import sys
+import tf
+import symengine as sp
+
 from time import time
-from gebsyas.ros_visualizer import ROSVisualizer
-from giskardpy.robot import Robot
-from giskardpy.symengine_wrappers import point3, vec3, pos_of, norm, x_col, y_col, z_col, unitZ, dot, frame3_rpy, abs, pi
-from pbsbtest.utils import res_pkg_path
+from blessed import Terminal
+from collections import OrderedDict
+
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_msgs.msg import Empty as EmptyMsg
 from rosgraph_msgs.msg import Clock as ClockMsg
-
-from giskardpy import USE_SYMENGINE
-from giskardpy.qpcontroller import QPController
-from giskardpy.qp_problem_builder import SoftConstraint
-from giskardpy.input_system import ControllerInputArray, ScalarInput
-from giskardpy.input_system import FrameInputRPY as FrameInput
 from geometry_msgs.msg import WrenchStamped as WrenchMsg
+from trajectory_msgs.msg import JointTrajectory as JointTrajectoryMsg
+from trajectory_msgs.msg import JointTrajectoryPoint as JointTrajectoryPointMsg 
+
+from gebsyas.ros_visualizer import ROSVisualizer
+from giskardpy.input_system import FrameInput, JointStatesInput
+from giskardpy.symengine_controller import SymEngineController as Controller
+from giskardpy.symengine_controller import position_conv, rotation_conv
+from giskardpy.symengine_wrappers import *
+from giskardpy.god_map import GodMap
+from giskardpy.trajectory import SingleJointState
+from giskardpy.utils import dict_to_joint_states
+from giskardpy.qp_problem_builder import SoftConstraint
 
 from iai_bullet_sim.basic_simulator import BasicSimulator
+from iai_bullet_sim.utils import Frame, Vector3, Quaternion
 from iai_bullet_sim.ros_modules import JSPublisher, SensorPublisher
 
-from blessed import Terminal
+from pbsbtest.utils import res_pkg_path
 
-class EEFPositionControl(QPController):
-    def __init__(self, robot, eef, wrist, velocity=0.2, weight=1):
-        self.weight = weight
-        self.velocity = velocity
-        self.eef = eef
-        self.wrist = wrist
-        super(EEFPositionControl, self).__init__(robot)
-
-    # @profile
-    def add_inputs(self, robot):
-        self.goal_eef = {}
-        self.goal_weights = {}
-        for eef in robot.end_effectors:
-            self.goal_eef[eef] = FrameInput(prefix=eef, suffix='goal')
-            self.goal_weights[eef] = ScalarInput(prefix=eef, suffix='sc_w')
-
-    # @profile
-    def make_constraints(self, robot):
-        wrist_frame = robot.frames[self.wrist]
-        eef_frame = robot.frames[self.eef]
-        eef_y = y_col(eef_frame)
-        eef_forward = z_col(eef_frame)
-
-
-        goal_expr = self.goal_eef[self.eef].get_expression()
-        goal_x = x_col(goal_expr)
-        goal_y = y_col(goal_expr)
-        goal_z = z_col(goal_expr)
-        
-        x_z_dot = dot(eef_forward, -goal_z)
-        x_z_dot_ctrl = 1 - x_z_dot
-        y_x_dot = abs(dot(eef_y, goal_x))
-        y_x_dot_ctrl = 1 - y_x_dot
-        # dist = norm(sp.Add(pos_of(eef_frame), - goal_expr, evaluate=False))
-        eef_in_goal = pos_of(wrist_frame) - pos_of(goal_expr)
-        dist_x = abs(dot(goal_x, eef_in_goal))
-        dist_y = abs(dot(goal_y, eef_in_goal))
-        dist_z = abs(dot(goal_z, eef_in_goal))
-        #dist_ctrl = x_z_dot * y_x_dot * -min(dist, self.velocity)
-        
-        self._soft_constraints['align {} position_x'.format(self.eef)] = SoftConstraint(lower=-dist_x,
-                                                                        upper=-dist_x,
-                                                                        weight=self.goal_weights[self.eef].get_expression(),
-                                                                        expression=dist_x)
-        self._soft_constraints['align {} position_y'.format(self.eef)] = SoftConstraint(lower=-dist_y,
-                                                                        upper=-dist_y,
-                                                                        weight=self.goal_weights[self.eef].get_expression(),
-                                                                        expression=dist_y)
-        self._soft_constraints['align {} position_z'.format(self.eef)] = SoftConstraint(lower=-dist_z,
-                                                                        upper=-dist_z,
-                                                                        weight=self.goal_weights[self.eef].get_expression(),
-                                                                        expression=dist_z)
-
-        self._soft_constraints['align {}.z to -goal.z'.format(self.eef)] = SoftConstraint(x_z_dot_ctrl, 
-                                                                                        x_z_dot_ctrl, 
-                                                                                        self.goal_weights[self.eef].get_expression(),
-                                                                                        x_z_dot)
-        self._soft_constraints['align {}.y to goal.y'.format(self.eef)] = SoftConstraint(y_x_dot_ctrl, 
-                                                                                    y_x_dot_ctrl, 
-                                                                                    self.goal_weights[self.eef].get_expression(),
-                                                                                    y_x_dot)
-        self._controllable_constraints = robot.joint_constraints
-        self._hard_constraints = robot.hard_constraints
-        self.update_observables({self.goal_weights[self.eef].get_symbol_str(): self.weight})
-        self.set_goal([0]*6)
-
-
-    def set_goal(self, goal):
-        """
-        dict eef_name -> goal_position
-        :param goal_pos:
-        :return:
-        """
-        #for eef, goal_pos in goal.items():
-        self.update_observables(self.goal_eef[self.eef].get_update_dict(*goal))
-
+pi = 3.14159265359
 
 class Node(object):
-    def __init__(self, urdf_path, base_link, eef_frame, wrist_link, wps):
+    def __init__(self, urdf_path, base_link, eef_link, wrist_link, wps, projection_frame):
         self.vis = ROSVisualizer('force_test', base_frame=base_link, plot_topic='plot')
-        self.wps = wps
+        self.wps = [Frame(Vector3(*wp[3:]), Quaternion(*list(quaternion_from_rpy(*wp[:3])))) for wp in wps]
         self.wpsIdx = 0
+        self.base_link = base_link
+        self.god_map = GodMap()
 
-        # Giskard
-        self.robot = Robot()
-        self.robot.load_from_urdf_path(res_pkg_path(urdf_path), base_link, [eef_frame])
-        self.sensor_frame = self.robot.frames[wrist_link]
-        self.wrist_pos = pos_of(self.sensor_frame)
+        self.js_prefix = 'joint_state'
+        
+        self.js_pub = rospy.Publisher('/joint_states', JointStateMsg, queue_size=1, tcp_nodelay=True)
+        self.traj_pub = rospy.Publisher('/ur5_table_description/commands/joint_trajectory', JointTrajectoryMsg, queue_size=1, tcp_nodelay=True)
+        self.wrench_pub = rospy.Publisher('wrist_force_transformed', WrenchMsg, queue_size=1, tcp_nodelay=True)
 
+        # Giskard ----------------------------
+        # Init controller, setup controlled joints
+        self.controller = Controller(res_pkg_path(urdf_path), res_pkg_path('package://pbsbtest/.controllers/'), 0.6)
+        self.robot = self.controller.robot
+        
+        self.js_input = JointStatesInput.prefix_constructor(self.god_map.get_expr, self.robot.get_joint_names(), self.js_prefix, 'position')
+        
+        self.robot.set_joint_symbol_map(self.js_input)
+        self.controller.set_controlled_joints(self.robot.get_joint_names())
+        
+        # Get eef and sensor frame
+        self.sensor_frame = self.robot.get_fk_expression(base_link, wrist_link)
+        self.eef_frame    = self.robot.get_fk_expression(base_link, eef_link)
+        self.eef_pos      = pos_of(self.eef_frame)
 
-        mplate_pos = pos_of(self.robot.frames['arm_mounting_plate'])
+        # Construct motion frame
+        mplate_pos = pos_of(self.robot.get_fk_expression(base_link, 'arm_mounting_plate'))
         self.motion_frame = frame3_rpy(pi, 0, pi * 0.5, mplate_pos)
-        self.sensor_motion_frame_inv = self.motion_frame.inv() * self.sensor_frame
 
-        self.controller = EEFPositionControl(self.robot, eef_frame, wrist_link, velocity=1)
-        waypoint = self.motion_frame * point3(*(self.wps[self.wpsIdx][3:]))
-        self.controller.set_goal((0,0,0, waypoint[0], waypoint[1], waypoint[2]))
+        wp_frame = self.motion_frame * FrameInput.prefix_constructor('goal/position', 'goal/quaternion', self.god_map.get_expr).get_frame()
+        wp_pos = pos_of(wp_frame)
 
 
-        # Sim things
+        # Projection frame
+        self.world_to_projection_frame = projection_frame
+
+        # Pre init
+        self.god_map.set_data(['goal'], self.wps[0])
         self.tick_rate = 50
-        self.sim = BasicSimulator(self.tick_rate)
-        self.sim.init(mode='gui')
-    
-        plane = self.sim.load_urdf('package://iai_bullet_sim/urdf/plane.urdf', useFixedBase=1)
+        deltaT = 1.0 / self.tick_rate
+        js = {j: SingleJointState(j) for j in self.robot.get_joint_names()}
+        self.god_map.set_data([self.js_prefix], js)
 
-        self.sensor_joint = 'wrist_3_joint'
-        self.ur5 = self.sim.load_urdf(urdf_path, useFixedBase=1)
-        self.ur5.enable_joint_sensor(self.sensor_joint)
-        ur5Id = self.sim.get_body_id(self.ur5.bId())
-        self.ur5_js_pub = JSPublisher(self.ur5, ur5Id)
-        self.sim.register_post_physics_cb(self.ur5_js_pub.update)
-        self.sensor_pub = rospy.Publisher('{}/sensors/{}'.format(ur5Id, self.sensor_joint), WrenchMsg, queue_size=1)
-        
-        self.clock_pub = rospy.Publisher('/clock', ClockMsg, queue_size=1)
-        self.time = rospy.Time()
-        self.time_step = rospy.Duration(1.0 / self.tick_rate)
-        self.terminal = Terminal()
-        self.__last_tick = None
-        self.__last_msg_len = 0
+        err = norm(wp_pos - self.eef_pos)
+        rot_err = dot(wp_frame * unitZ, self.eef_frame * unitZ)
 
-        self.ur5_fixed_positions = {#'gripper_base_gripper_left_joint': 0,
-                                    'gripper_joint': 0}
+        scons = position_conv(wp_pos, self.eef_pos) # {'align position': SoftConstraint(-err, -err, 1, err)}
+        scons.update(rotation_conv(rot_of(wp_frame), rot_of(self.eef_frame), rot_of(self.eef_frame).subs(self.god_map.get_expr_values())))
+        self.controller.init(scons, self.god_map.get_free_symbols())
 
 
-    def tick(self):
-        self.time += self.time_step
-        cmsg = ClockMsg()
-        cmsg.clock = self.time
-        self.clock_pub.publish(cmsg)
+        print('Solving for initial state...')
+        # Go to initial configuration
+        init_it = 0
+        while True and not rospy.is_shutdown():
+            cvals = self.god_map.get_expr_values()
+            eef_pos = self.eef_pos.subs(cvals)
+            if err.subs(cvals) < 0.01 and rot_err.subs(cvals) > 0.999:
+                break
+            cmd = self.controller.get_cmd(cvals)
+            for j, v in cmd.items():
+                js[j].position += deltaT * v
 
-        js = {j: s.position for j, s in self.ur5.joint_state().items()}
-        self.robot.set_joint_state(js)
-        eef_position = self.wrist_pos.subs(js)
-        waypoint = self.motion_frame * point3(*(self.wps[self.wpsIdx][3:]))
-        dist = norm(eef_position - waypoint)        
-        if dist < 0.03:
-            self.wpsIdx = (self.wpsIdx + 1) % len(wps)
-            print('\nWaypoint reaced. Next one is number {}'.format(self.wpsIdx))
-        
-        self.controller.set_goal((0,0,0, waypoint[0], waypoint[1], waypoint[2]))
+            msg = dict_to_joint_states({n: s.position for n, s in js.items()})
+            msg.header.stamp = rospy.Time.now()
+            self.js_pub.publish(msg)
+            init_it += 1
 
-        next_cmd = self.controller.get_next_command()
+        print('Finding of initial pose took {} iterations.'.format(init_it))
+        print('About to plan trajectory...')
+
+        # Generate trajectory
+        trajectory = OrderedDict()
+        traj_stamp = rospy.Duration(0.0)
+        ros_deltaT = rospy.Duration(deltaT)
+        section_stamps = []
+        for x in range(1, len(self.wps)):
+            print('Heading for point {}'.format(x))
+            self.god_map.set_data(['goal'], self.wps[x])
+            section_stamps.append(traj_stamp)
+            while True and not rospy.is_shutdown():
+                new_js = {}
+                for j, v in js.items():
+                    new_js[j] = SingleJointState(j, v.position, v.velocity, v.effort)
+                trajectory[traj_stamp] = new_js
+                cvals = self.god_map.get_expr_values()
+                eef_pos = self.eef_pos.subs(cvals)
+                wp_r = wp_pos.subs(cvals)
+                wp_f = wp_frame.subs(cvals)
+                print('Dist = {}'.format(err.subs(cvals)))
+                if norm(eef_pos - wp_pos.subs(cvals)) < 0.01:
+                    break
+                cmd   = self.controller.get_cmd(cvals)
+                for j, v in cmd.items():
+                    js[j] = SingleJointState(j, js[j].position + deltaT * v, 0, 0)
+                traj_stamp += ros_deltaT
+
+                msg = dict_to_joint_states({n: s.position for n, s in js.items()})
+                msg.header.stamp = rospy.Time.now()
+                self.js_pub.publish(msg)
+
+                self.vis.begin_draw_cycle()
+                self.vis.draw_sphere('eef_giskard', eef_pos, 0.025)
+                self.vis.draw_vector('goal', wp_r, wp_f * unitX, g=0, b=0)
+                self.vis.draw_vector('goal', wp_r, wp_f * unitY, r=0, b=0)
+                self.vis.draw_vector('goal', wp_r, wp_f * unitZ, g=0, r=0)
+                self.vis.render()
 
 
-        self.ur5.apply_joint_vel_cmds(next_cmd)
-        self.ur5.apply_joint_pos_cmds(self.ur5_fixed_positions)
+        print('Trajectory planned! {} points over a duration of {} seconds.'.format(len(trajectory), len(trajectory) * deltaT))
 
-        self.sim.update()
 
-        state = self.ur5.get_sensor_states()['wrist_3_joint']
-        f = self.sensor_motion_frame_inv.subs(js) * vec3(*state.f)
-        t = self.sensor_motion_frame_inv.subs(js) * vec3(*state.m) 
+        traj_msg = JointTrajectoryMsg()
+        traj_msg.header.stamp = rospy.Time.now()
+        traj_msg.joint_names  = trajectory.items()[0][1].keys()
+        for t, v in trajectory.items():
+            point = JointTrajectoryPointMsg()
+            point.positions = [v[j].position for j in traj_msg.joint_names]
+            point.time_from_start = t
+            traj_msg.points.append(point)
+
+
+        raw_input('Press ENTER to publish trajectory.')
+        self.traj_pub.publish(traj_msg)
+        self.tfListener = tf.TransformListener()
+        self.wrench_sub = rospy.Subscriber('/ur5_table_description/sensors/wrist_3_joint', WrenchMsg, callback=self.transform_wrench, queue_size=1)
+
+
+    def transform_wrench(self, wrench_msg):
+        try:
+            self.tfListener.waitForTransform(self.base_link, wrench_msg.header.frame_id, rospy.Time(0), rospy.Duration(0.1))
+            (trans,rot) = self.tfListener.lookupTransform(self.base_link, wrench_msg.header.frame_id, rospy.Time(0))
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+            print('Failed to transform wrench from {} to {}'.format(wrench_msg.header.frame_id, self.base_link))
+            return
+
+        f = wrench_msg.wrench.force
+
+        f = self.world_to_projection_frame * frame3_quaternion(trans[0], trans[1], trans[2], rot[0], rot[1], rot[2], rot[3]) * vector3(f.x, f.y, f.z)
+        #t = self.projection_frame.subs(cvals) * vec3(*state.m) 
 
         sensor_msg = WrenchMsg()
-        sensor_msg.header.stamp = rospy.Time.now()
+        sensor_msg.header.stamp = wrench_msg.header.stamp
         sensor_msg.wrench.force.x  = f[0] 
         sensor_msg.wrench.force.y  = f[1] 
         sensor_msg.wrench.force.z  = f[2] 
-        sensor_msg.wrench.torque.x = t[0] 
-        sensor_msg.wrench.torque.y = t[1] 
-        sensor_msg.wrench.torque.z = t[2] 
-        self.sensor_pub.publish(sensor_msg)
-
-        self.vis.begin_draw_cycle()
-        self.vis.draw_sphere('eef_giskard', eef_position, 0.025)
-        self.vis.draw_sphere('goal', waypoint, 0.025, r=0, g=1)
-        self.vis.render()
-
-        now = time()
-        if self.__last_tick != None:
-            deltaT = now - self.__last_tick
-            ratio  = self.time_step.to_sec() / deltaT
-            sys.stdout.write(self.terminal.move(self.terminal.height,  0))
-            msg = u'Simulation Factor: {:03.4f}'.format(ratio)
-            self.__last_msg_len = len(msg)
-            sys.stdout.write(msg)
-            sys.stdout.flush()
-        self.__last_tick = now
+        # sensor_msg.wrench.torque.x = t[0] 
+        # sensor_msg.wrench.torque.y = t[1] 
+        # sensor_msg.wrench.torque.z = t[2] 
+        self.wrench_pub.publish(sensor_msg)
 
 
 if __name__ == '__main__':
@@ -214,12 +200,24 @@ if __name__ == '__main__':
     base_link = 'map'
 
 
-    wps = [(0,0,0, -0.1, 0.5, -0.1 - 0.213),
-           (0,0,0, -0.1, 0.5, -0.213), 
-           (0,0,0,  0.1, 0.5, -0.213),
-           (0,0,0,  0.1, 0.5, -0.1 - 0.213)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
+    wps = [(0, 0, 0, -0.1, 0.5, -0.1),
+           (0, 0, 0, -0.1, 0.5,  0.01), 
+           (0, 0, 0,  0.1, 0.5,  0.01),
+           (0, 0, 0,  0.1, 0.5, -0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
 
-    node = Node(urdf_path, base_link, eef_frame, wrist_link, wps)
+    twp = point3(*wps[2][3:])
+    pwp = point3(*wps[1][3:])
+    x_v = unitY# twp - pwp
+    #x_v = x_v / norm(x_v) # Normalize x_v
+    z_v = vector3(0,0,-1)
+    y_v = cross(z_v, x_v)
+
+    proj_frame = Matrix([[x_v[0], x_v[1], x_v[2], 0],
+                         [y_v[0], y_v[1], y_v[2], 0],
+                         [z_v[0], z_v[1], z_v[2], 0],
+                         [     0,      0,      0, 1]])
+
+    node = Node(urdf_path, base_link, eef_frame, wrist_link, wps, proj_frame)
 
     while not rospy.is_shutdown():
-        node.tick()
+        pass
