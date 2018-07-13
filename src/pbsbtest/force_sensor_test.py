@@ -14,7 +14,7 @@ from std_msgs.msg import Empty as EmptyMsg
 from rosgraph_msgs.msg import Clock as ClockMsg
 from geometry_msgs.msg import WrenchStamped as WrenchMsg
 from trajectory_msgs.msg import JointTrajectory as JointTrajectoryMsg
-from trajectory_msgs.msg import JointTrajectoryPoint as JointTrajectoryPointMsg 
+from trajectory_msgs.msg import JointTrajectoryPoint as JointTrajectoryPointMsg
 
 from gebsyas.ros_visualizer import ROSVisualizer
 from giskardpy.input_system import FrameInput, JointStatesInput
@@ -32,6 +32,42 @@ from iai_bullet_sim.ros_modules import JSPublisher, SensorPublisher
 
 from pbsbtest.utils import res_pkg_path
 
+def run_controller_until(god_map, controller, initial_js, js_prefix, term_goal_list, max_iterations=500):
+    """
+    Runs a controller until a set of goal terms t_g satisfy t_g < v_g, or a maximum number of iterations is reached.
+    Returns the final joint configuration and the positional trajectory generated during the iterations.
+    Raises an error, if the maximum number of iterations is reached without satisfying all goals.
+
+    :param controller:
+    :type controller: Controller
+    :param term_goal_list:
+    :type term_goal_list: [tuple]
+    :param max_iterations:
+    :type max_iterations:
+    :return: (final_js, trajectory)
+    :rtype:
+    """
+    js = {j: SingleJointState(j, s.position, s.velocity, s.effort) for j, s in initial_js.items()}
+    trajectory = OrderedDict()
+    traj_stamp = rospy.Duration(0.0)
+    ros_deltaT = rospy.Duration(deltaT)
+    it = 0
+    god_map.set_data([js_prefix], js)
+    while True and not rospy.is_shutdown():
+        trajectory[traj_stamp] = {j: SingleJointState(j, s.position, s.velocity, s.effort) for j, s in js.items()}
+        cvals = god_map.get_expr_values()
+        if min([goal_expr.subs(cvals) < goal_val for goal_expr, goal_val in term_goal_list]) is True:
+            break
+        if it >= max_iterations:
+            raise Exception('Failed to converge towards solution within {} iterations.'.format(max_iterations))
+        it  +=1
+        for j, v in controller.get_cmd(cvals).items():
+            js[j].position += v * deltaT
+        traj_stamp += ros_deltaT
+
+    return (js, trajectory)
+
+
 pi = 3.14159265359
 
 class Node(object):
@@ -43,7 +79,7 @@ class Node(object):
         self.god_map = GodMap()
 
         self.js_prefix = 'joint_state'
-        
+
         self.js_pub = rospy.Publisher('/joint_states', JointStateMsg, queue_size=1, tcp_nodelay=True)
         self.traj_pub = rospy.Publisher('/ur5_table_description/commands/joint_trajectory', JointTrajectoryMsg, queue_size=1, tcp_nodelay=True)
         self.wrench_pub = rospy.Publisher('wrist_force_transformed', WrenchMsg, queue_size=1, tcp_nodelay=True)
@@ -52,12 +88,12 @@ class Node(object):
         # Init controller, setup controlled joints
         self.controller = Controller(res_pkg_path(urdf_path), res_pkg_path('package://pbsbtest/.controllers/'), 0.6)
         self.robot = self.controller.robot
-        
+
         self.js_input = JointStatesInput.prefix_constructor(self.god_map.get_expr, self.robot.get_joint_names(), self.js_prefix, 'position')
-        
+
         self.robot.set_joint_symbol_map(self.js_input)
         self.controller.set_controlled_joints(self.robot.get_joint_names())
-        
+
         # Get eef and sensor frame
         self.sensor_frame = self.robot.get_fk_expression(base_link, wrist_link)
         self.eef_frame    = self.robot.get_fk_expression(base_link, eef_link)
@@ -91,60 +127,21 @@ class Node(object):
 
         print('Solving for initial state...')
         # Go to initial configuration
-        init_it = 0
-        while True and not rospy.is_shutdown():
-            cvals = self.god_map.get_expr_values()
-            eef_pos = self.eef_pos.subs(cvals)
-            if err.subs(cvals) < 0.01 and rot_err.subs(cvals) > 0.999:
-                break
-            cmd = self.controller.get_cmd(cvals)
-            for j, v in cmd.items():
-                js[j].position += deltaT * v
+        js = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01), (1 - rot_err, 0.001)])[0]
 
-            msg = dict_to_joint_states({n: s.position for n, s in js.items()})
-            msg.header.stamp = rospy.Time.now()
-            self.js_pub.publish(msg)
-            init_it += 1
-
-        print('Finding of initial pose took {} iterations.'.format(init_it))
         print('About to plan trajectory...')
 
         # Generate trajectory
         trajectory = OrderedDict()
         traj_stamp = rospy.Duration(0.0)
-        ros_deltaT = rospy.Duration(deltaT)
         section_stamps = []
         for x in range(1, len(self.wps)):
             print('Heading for point {}'.format(x))
             self.god_map.set_data(['goal'], self.wps[x])
-            section_stamps.append(traj_stamp)
-            while True and not rospy.is_shutdown():
-                new_js = {}
-                for j, v in js.items():
-                    new_js[j] = SingleJointState(j, v.position, v.velocity, v.effort)
-                trajectory[traj_stamp] = new_js
-                cvals = self.god_map.get_expr_values()
-                eef_pos = self.eef_pos.subs(cvals)
-                wp_r = wp_pos.subs(cvals)
-                wp_f = wp_frame.subs(cvals)
-                print('Dist = {}'.format(err.subs(cvals)))
-                if norm(eef_pos - wp_pos.subs(cvals)) < 0.01:
-                    break
-                cmd   = self.controller.get_cmd(cvals)
-                for j, v in cmd.items():
-                    js[j] = SingleJointState(j, js[j].position + deltaT * v, 0, 0)
-                traj_stamp += ros_deltaT
-
-                msg = dict_to_joint_states({n: s.position for n, s in js.items()})
-                msg.header.stamp = rospy.Time.now()
-                self.js_pub.publish(msg)
-
-                self.vis.begin_draw_cycle()
-                self.vis.draw_sphere('eef_giskard', eef_pos, 0.025)
-                self.vis.draw_vector('goal', wp_r, wp_f * unitX, g=0, b=0)
-                self.vis.draw_vector('goal', wp_r, wp_f * unitY, r=0, b=0)
-                self.vis.draw_vector('goal', wp_r, wp_f * unitZ, g=0, r=0)
-                self.vis.render()
+            js, sub_traj = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01)])
+            for time_code, position in sub_traj.items():
+                trajectory[traj_stamp + time_code] = position
+            traj_stamp = sub_traj.keys()[-1]
 
 
         print('Trajectory planned! {} points over a duration of {} seconds.'.format(len(trajectory), len(trajectory) * deltaT))
@@ -177,22 +174,22 @@ class Node(object):
         f = wrench_msg.wrench.force
 
         f = self.world_to_projection_frame * frame3_quaternion(trans[0], trans[1], trans[2], rot[0], rot[1], rot[2], rot[3]) * vector3(f.x, f.y, f.z)
-        #t = self.projection_frame.subs(cvals) * vec3(*state.m) 
+        #t = self.projection_frame.subs(cvals) * vec3(*state.m)
 
         sensor_msg = WrenchMsg()
         sensor_msg.header.stamp = wrench_msg.header.stamp
-        sensor_msg.wrench.force.x  = f[0] 
-        sensor_msg.wrench.force.y  = f[1] 
-        sensor_msg.wrench.force.z  = f[2] 
-        # sensor_msg.wrench.torque.x = t[0] 
-        # sensor_msg.wrench.torque.y = t[1] 
-        # sensor_msg.wrench.torque.z = t[2] 
+        sensor_msg.wrench.force.x  = f[0]
+        sensor_msg.wrench.force.y  = f[1]
+        sensor_msg.wrench.force.z  = f[2]
+        # sensor_msg.wrench.torque.x = t[0]
+        # sensor_msg.wrench.torque.y = t[1]
+        # sensor_msg.wrench.torque.z = t[2]
         self.wrench_pub.publish(sensor_msg)
 
 
 if __name__ == '__main__':
     rospy.init_node('force_test')
-    
+
     urdf_path = 'package://iai_table_robot_description/robots/ur5_table.urdf'
 
     wrist_link = 'ee_link'
@@ -201,7 +198,7 @@ if __name__ == '__main__':
 
 
     wps = [(0, 0, 0, -0.1, 0.5, -0.1),
-           (0, 0, 0, -0.1, 0.5,  0.01), 
+           (0, 0, 0, -0.1, 0.5,  0.01),
            (0, 0, 0,  0.1, 0.5,  0.01),
            (0, 0, 0,  0.1, 0.5, -0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
 
