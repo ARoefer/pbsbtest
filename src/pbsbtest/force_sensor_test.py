@@ -32,7 +32,7 @@ from iai_bullet_sim.ros_modules import JSPublisher, SensorPublisher
 
 from pbsbtest.utils import res_pkg_path
 
-def run_controller_until(god_map, controller, initial_js, js_prefix, term_goal_list, max_iterations=500):
+def run_controller_until(god_map, controller, initial_js, js_prefix, term_goal_list, step_size=0.05, max_iterations=500):
     """
     Runs a controller until a set of goal terms t_g satisfy t_g < v_g, or a maximum number of iterations is reached.
     Returns the final joint configuration and the positional trajectory generated during the iterations.
@@ -50,19 +50,25 @@ def run_controller_until(god_map, controller, initial_js, js_prefix, term_goal_l
     js = {j: SingleJointState(j, s.position, s.velocity, s.effort) for j, s in initial_js.items()}
     trajectory = OrderedDict()
     traj_stamp = rospy.Duration(0.0)
-    ros_deltaT = rospy.Duration(deltaT)
+    ros_deltaT = rospy.Duration(step_size)
     it = 0
     god_map.set_data([js_prefix], js)
     while True and not rospy.is_shutdown():
         trajectory[traj_stamp] = {j: SingleJointState(j, s.position, s.velocity, s.effort) for j, s in js.items()}
         cvals = god_map.get_expr_values()
-        if min([goal_expr.subs(cvals) < goal_val for goal_expr, goal_val in term_goal_list]) is True:
+        done  = True
+        for goal_expr, goal_val in term_goal_list:
+            done = done and goal_expr.subs(cvals) < goal_val
+        if done:
             break
         if it >= max_iterations:
-            raise Exception('Failed to converge towards solution within {} iterations.'.format(max_iterations))
+            err_str    = 'Failed to converge towards solution within {} iterations.'.format(max_iterations)
+            js_cmp_str = '               Joint             Initial               Final\n{}'.format('\n'.join(['{:>20}{:>20}{:>20}'.format(j, initial_js[j].position, s.position) for j, s in js.items()]))
+            goal_str   = '\n'.join(['{:>20} <= {:<20}'.format(str(term.subs(cvals)), g) for term, g in term_goal_list])
+            raise Exception('{}\nJoint States:\n{}\nGoal terms:\n{}'.format(err_str, js_cmp_str, goal_str))
         it  +=1
         for j, v in controller.get_cmd(cvals).items():
-            js[j].position += v * deltaT
+            js[j].position += v * step_size
         traj_stamp += ros_deltaT
 
     return (js, trajectory)
@@ -114,6 +120,8 @@ class Node(object):
         self.tick_rate = 50
         deltaT = 1.0 / self.tick_rate
         js = {j: SingleJointState(j) for j in self.robot.get_joint_names()}
+        js['gripper_base_gripper_left_joint'] = SingleJointState('gripper_base_gripper_left_joint')
+
         self.god_map.set_data([self.js_prefix], js)
 
         err = norm(wp_pos - self.eef_pos)
@@ -126,7 +134,7 @@ class Node(object):
 
         print('Solving for initial state...')
         # Go to initial configuration
-        js = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01), (1 - rot_err, 0.001)])[0]
+        js = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01), (1 - rot_err, 0.001)], deltaT)[0]
 
         print('About to plan trajectory...')
 
@@ -137,10 +145,10 @@ class Node(object):
         for x in range(1, len(self.wps)):
             print('Heading for point {}'.format(x))
             self.god_map.set_data(['goal'], self.wps[x])
-            js, sub_traj = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01)])
+            js, sub_traj = run_controller_until(self.god_map, self.controller, js, self.js_prefix, [(err, 0.01)], deltaT)
             for time_code, position in sub_traj.items():
                 trajectory[traj_stamp + time_code] = position
-            traj_stamp = sub_traj.keys()[-1]
+            traj_stamp += sub_traj.keys()[-1]
 
 
         print('Trajectory planned! {} points over a duration of {} seconds.'.format(len(trajectory), len(trajectory) * deltaT))
@@ -155,8 +163,22 @@ class Node(object):
             point.time_from_start = t
             traj_msg.points.append(point)
 
+        js_advertised = False
+        print('Waiting for joint state topic to be published.')
+        while not js_advertised and not rospy.is_shutdown():
+            topics = [t for t, tt in rospy.get_published_topics()]
+            if '/joint_states' in topics:
+                js_advertised = True
 
-        raw_input('Press ENTER to publish trajectory.')
+        if not js_advertised:
+            print('Robot does not seem to be started. Aborting...')
+            return
+
+        print('Joint state has been advertised. Waiting 2 seconds for the controller...')
+        rospy.sleep(2.0)
+
+        print('Sending trajectory.')
+        #raw_input('Press ENTER to publish trajectory.')
         self.traj_pub.publish(traj_msg)
         self.tfListener = tf.TransformListener()
         self.wrench_sub = rospy.Subscriber('~wrist_wrench', WrenchMsg, callback=self.transform_wrench, queue_size=1)
@@ -166,7 +188,7 @@ class Node(object):
         try:
             self.tfListener.waitForTransform(self.base_link, wrench_msg.header.frame_id, rospy.Time(0), rospy.Duration(0.1))
             (trans,rot) = self.tfListener.lookupTransform(self.base_link, wrench_msg.header.frame_id, rospy.Time(0))
-        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+        except:
             print('Failed to transform wrench from {} to {}'.format(wrench_msg.header.frame_id, self.base_link))
             return
 
@@ -177,6 +199,7 @@ class Node(object):
 
         sensor_msg = WrenchMsg()
         sensor_msg.header.stamp = wrench_msg.header.stamp
+        sensor_msg.header.frame_id = self.base_link
         sensor_msg.wrench.force.x  = f[0]
         sensor_msg.wrench.force.y  = f[1]
         sensor_msg.wrench.force.z  = f[2]
@@ -196,10 +219,10 @@ if __name__ == '__main__':
     base_link = 'map'
 
 
-    wps = [(0, 0, 0, -0.1, 0.5, -0.1),
-           (0, 0, 0, -0.1, 0.5,  0.01),
-           (0, 0, 0,  0.1, 0.5,  0.01),
-           (0, 0, 0,  0.1, 0.5, -0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
+    wps = [(0, 0, 0, -0.1, 0.45, -0.1),
+           (0, 0, 0, -0.1, 0.45,  0.01),
+           (0, 0, 0,  0.1, 0.45,  0.01),
+           (0, 0, 0,  0.1, 0.45, -0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
 
     twp = point3(*wps[2][3:])
     pwp = point3(*wps[1][3:])
