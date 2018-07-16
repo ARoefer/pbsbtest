@@ -5,12 +5,12 @@
     textfile="$(find iai_table_robot_description)/robots/ur5_table.urdf" />
 
   <node pkg="pbsbtest" type="force_sensor_test.py" name="force_test" output="screen">
-    <remap from="~joint_trajectory" to="/ur5_table_description/commands/joint_trajectory"/>
-    <remap from="~wrist_wrench" to="/ur5_table_description/sensors/wrist_3_joint"/>
+    <remap from="~joint_trajectory" to="/commands/joint_trajectory"/>
+    <remap from="~wrist_wrench" to="/sensors/wrist_3_joint"/>
   </node>
 
   <node pkg="iai_bullet_sim" type="realtime_simulator.py" name="simulator" output="screen">
-    <rosparam command="load" file="$(find pbsbtest)/config/ur5_box_push_config.yaml" />
+    <rosparam param="/sim_config" command="load" file="$(find pbsbtest)/config/ur5_box_push_config.yaml" />
   </node>
 
   <node pkg="robot_state_publisher" type="robot_state_publisher"

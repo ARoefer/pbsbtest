@@ -4,7 +4,7 @@ plugins:
   topic_prefix: ''}
 - {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.SensorPublisher'>,
   topic_prefix: ''}
-- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.TrajectoryPositionController'>,
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.LoopingTrajectoryPositionController'>,
   topic_prefix: ''}
 tick_rate: 50
 world:

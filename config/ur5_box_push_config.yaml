@@ -1,6 +1,6 @@
 gravity: [0, 0, -9.81]
 plugins:
-- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.TrajectoryPositionController'>,
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.ResetTrajectoryPositionController'>,
   topic_prefix: ''}
 - {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.JSPublisher'>,
   topic_prefix: ''}
@@ -15,7 +15,7 @@ world:
     geom_type: box
     height: 1
     initial_pose:
-      position: [-0.3, -0.3, 0.625]
+      position: [-0.3, -0.3, 0.64]
       rotation: [0, 0, 0, 1]
     mass: 0.5
     name: box

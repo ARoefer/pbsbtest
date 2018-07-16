@@ -1,6 +1,6 @@
 gravity: [0, 0, -9.81]
 plugins:
-- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.TrajectoryPositionController'>,
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.LoopingTrajectoryPositionController'>,
   topic_prefix: ''}
 - {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.JSPublisher'>,
   topic_prefix: ''}
@@ -17,7 +17,7 @@ world:
     initial_pose:
       position: [-0.3, -0.3, 0.61]
       rotation: [0, 0, 0, 1]
-    mass: 0.5
+    mass: 0
     name: cylinder
     radius: 0.01
     type: rigid_body
