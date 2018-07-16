@@ -1,0 +1,34 @@
+gravity: [0, 0, -9.81]
+plugins:
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.TrajectoryPositionController'>,
+  topic_prefix: ''}
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.JSPublisher'>,
+  topic_prefix: ''}
+- {body: ur5_table_description, plugin_type: <class 'iai_bullet_sim.ros_plugins.SensorPublisher'>,
+  topic_prefix: ''}
+tick_rate: 50
+world:
+  constraints: []
+  objects:
+  - color: [0.95, 0.28500000000000003, 1.1519112306719625, 1.0]
+    extents: [1, 1, 1]
+    geom_type: cylinder
+    height: 0.005
+    initial_pose:
+      position: [-0.3, -0.3, 0.61]
+      rotation: [0, 0, 0, 1]
+    mass: 0.5
+    name: cylinder
+    radius: 0.01
+    type: rigid_body
+  - fixed_base: true
+    initial_joint_state: {elbow_joint: 0.0, gripper_base_gripper_left_joint: -0.0027,
+      gripper_joint: 0.0065, shoulder_lift_joint: 0.0, shoulder_pan_joint: 0.0, wrist_1_joint: 0.0,
+      wrist_2_joint: 0.0, wrist_3_joint: 0.0}
+    initial_pose:
+      position: [0, 0, 0]
+      rotation: [0, 0, 0, 1]
+    name: ur5_table_description
+    sensors: [wrist_3_joint]
+    type: multibody
+    urdf_path: package://iai_table_robot_description/robots/ur5_table.urdf
