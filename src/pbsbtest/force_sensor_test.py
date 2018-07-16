@@ -80,9 +80,8 @@ class Node(object):
 
         self.js_prefix = 'joint_state'
 
-        self.js_pub = rospy.Publisher('/joint_states', JointStateMsg, queue_size=1, tcp_nodelay=True)
-        self.traj_pub = rospy.Publisher('/ur5_table_description/commands/joint_trajectory', JointTrajectoryMsg, queue_size=1, tcp_nodelay=True)
-        self.wrench_pub = rospy.Publisher('wrist_force_transformed', WrenchMsg, queue_size=1, tcp_nodelay=True)
+        self.traj_pub = rospy.Publisher('~joint_trajectory', JointTrajectoryMsg, queue_size=1, tcp_nodelay=True)
+        self.wrench_pub = rospy.Publisher('~wrist_force_transformed', WrenchMsg, queue_size=1, tcp_nodelay=True)
 
         # Giskard ----------------------------
         # Init controller, setup controlled joints
@@ -160,7 +159,7 @@ class Node(object):
         raw_input('Press ENTER to publish trajectory.')
         self.traj_pub.publish(traj_msg)
         self.tfListener = tf.TransformListener()
-        self.wrench_sub = rospy.Subscriber('/ur5_table_description/sensors/wrist_3_joint', WrenchMsg, callback=self.transform_wrench, queue_size=1)
+        self.wrench_sub = rospy.Subscriber('~wrist_wrench', WrenchMsg, callback=self.transform_wrench, queue_size=1)
 
 
     def transform_wrench(self, wrench_msg):
