@@ -1,0 +1,16 @@
+- git:
+    local-name: pbsbtest
+    uri: https://github.com/ARoefer/pbsbtest.git
+    version: master
+- git:
+    local-name: iai_table_robot_description
+    uri: https://github.com/code-iai/iai_table_robot_description.git
+    version: master
+- git:
+    local-name: iai_bullet_sim
+    uri: https://github.com/ARoefer/iai_bullet_sim.git
+    version: master
+- git:
+    local-name: giskardpy
+    uri: https://github.com/SemRoCo/giskardpy.git
+    version: devel_v0.2
