@@ -4,7 +4,7 @@
   <param name="robot_description"
     textfile="$(find iai_table_robot_description)/robots/ur5_table.urdf" />
 
-  <node pkg="pbsbtest" type="force_sensor_test.py" name="force_test" output="screen">
+  <node pkg="pbsbtest" type="force_sensor_test.py" name="force_test" output="screen" args="0.01">
     <remap from="~joint_trajectory" to="/commands/joint_trajectory"/>
     <remap from="~wrist_wrench" to="/sensors/wrist_3_joint"/>
   </node>

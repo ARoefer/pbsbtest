@@ -178,7 +178,6 @@ class Node(object):
         rospy.sleep(2.0)
 
         print('Sending trajectory.')
-        #raw_input('Press ENTER to publish trajectory.')
         self.traj_pub.publish(traj_msg)
         self.tfListener = tf.TransformListener()
         self.wrench_sub = rospy.Subscriber('~wrist_wrench', WrenchMsg, callback=self.transform_wrench, queue_size=1)
@@ -210,6 +209,13 @@ class Node(object):
 
 
 if __name__ == '__main__':
+
+    if len(sys.argv) < 2:
+        print('Table penetration depth needed.')
+        exit()
+
+    table_offset = float(sys.argv[1])
+
     rospy.init_node('force_test')
 
     urdf_path = 'package://iai_table_robot_description/robots/ur5_table.urdf'
@@ -220,8 +226,8 @@ if __name__ == '__main__':
 
 
     wps = [(0, 0, 0, -0.1, 0.45, -0.1),
-           (0, 0, 0, -0.1, 0.45,  0.01),
-           (0, 0, 0,  0.1, 0.45,  0.01),
+           (0, 0, 0, -0.1, 0.45,  table_offset),
+           (0, 0, 0,  0.1, 0.45,  table_offset),
            (0, 0, 0,  0.1, 0.45, -0.1)] #[point3(1,1,1.1), point3(1,1,1), point3(0.2,0,1), point3(0.2,0,1.1)]
 
     twp = point3(*wps[2][3:])

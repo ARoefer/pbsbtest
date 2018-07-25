@@ -21,6 +21,17 @@ world:
     name: box
     radius: 0.5
     type: rigid_body
+  - color: [1, 1, 1, 1.0]
+    extents: [0.6, 0.6, 0.01]
+    geom_type: box
+    height: 1
+    initial_pose:
+      position: [-0.3, -0.3, 0.603]
+      rotation: [0, 0, 0, 1]
+    mass: 0.0
+    name: table
+    radius: 0.5
+    type: rigid_body
   - fixed_base: true
     initial_joint_state: {elbow_joint: 0.0, gripper_base_gripper_left_joint: -0.0027,
       gripper_joint: 0.0065, shoulder_lift_joint: 0.0, shoulder_pan_joint: 0.0, wrist_1_joint: 0.0,
